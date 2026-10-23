@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const admin = require('firebase-admin');
+const { initializeApp, cert } = require('firebase-admin/app');
 const fs = require('fs');
 
 const app = express();
@@ -14,8 +14,8 @@ const serviceAccountPath = '/etc/secrets/serviceAccountKey.json';
 if (fs.existsSync(serviceAccountPath)) {
 const serviceAccount = require(serviceAccountPath);
 
-admin.initializeApp({
-credential: admin.credential.cert(serviceAccount),
+initializeApp({
+credential: cert(serviceAccount),
 databaseURL: 'https://my-chat-app-eee62-default-rtdb.asia-southeast1.firebasedatabase.app'
 });
 
