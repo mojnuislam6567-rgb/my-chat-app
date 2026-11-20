@@ -141,13 +141,13 @@ app.post('/send-notification', async (req, res) => {
                     const call = callSnapshot.val();
 
                     if (
-                        !call ||
-                        call.status !== 'calling' ||
-                        call.receiverUid !== receiverUid
-                    ) {
-                        console.log('Call was answered or ended:', callId);
-                        return;
-                    }
+    !call ||
+    (call.status !== 'calling' && call.status !== 'ringing') ||
+    call.receiverUid !== receiverUid
+) {
+    console.log('Call was answered or ended:', callId);
+    return;
+}
 
                     // একই কলের জন্য একবারই Missed Notification
                     const missedRef = callRef.child('missedNotificationSent');
