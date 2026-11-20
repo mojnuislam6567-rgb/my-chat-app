@@ -23,8 +23,7 @@ const serviceAccount = require(serviceAccountPath);
 
 const firebaseApp = initializeApp({
     credential: cert(serviceAccount),
-    databaseURL:
-        'https://my-chat-app-eee62-default-rtdb.asia-southeast1.firebasedatabase.app'
+    databaseURL: 'https://my-chat-app-eee62-default-rtdb.asia-southeast1.firebasedatabase.app'
 });
 
 const auth = getAuth(firebaseApp);
@@ -37,7 +36,6 @@ app.get('/', (req, res) => {
     res.send('ChatApp Backend is running!');
 });
 
-// Send incoming call or new message notification
 app.post('/send-notification', async (req, res) => {
     try {
         const authorization = req.headers.authorization || '';
@@ -75,15 +73,7 @@ app.post('/send-notification', async (req, res) => {
             });
         }
 
-        if (type === 'incoming_audio_call' && !callId) {
-            return res.status(400).json({
-                error: 'callId is required'
-            });
-        }
-
-        if (
-            decodedToken.uid === receiverUid
-        ) {
+        if (decodedToken.uid === receiverUid) {
             return res.status(400).json({
                 error: 'Cannot notify yourself'
             });
@@ -103,29 +93,109 @@ app.post('/send-notification', async (req, res) => {
 
         const isCall = type === 'incoming_audio_call';
 
-        const title = isCall
-            ? 'Incoming Audio Call'
-            : (senderName || 'New Message');
+        if (isCall && !callId) {
+            return res.status(400).json({
+                error: 'callId is required'
+            });
+        }
 
-        const body = isCall
-            ? `${callerName || 'Someone'} is calling you`
-            : (message || 'You received a new message');
+        if (isCall) {
+            const callSnapshot = await db
+                .ref(`audioCalls/${callId}`)
+                .get();
+
+            const call = callSnapshot.val();
+
+            if (
+                !call ||
+                call.callerUid !== decodedToken.uid ||
+                call.receiverUid !== receiverUid
+            ) {
+                return res.status(403).json({
+                    error: 'Invalid call'
+                });
+            }
+        }
 
         const result = await messaging.send({
             token: fcmToken,
-
             data: {
-                type: type,
+                type,
                 callerName: callerName || '',
                 callId: callId || '',
+                callerUid: decodedToken.uid,
                 senderName: senderName || '',
                 message: message || ''
             },
-
             android: {
                 priority: 'high'
             }
         });
+
+        // কলের ৩০ সেকেন্ড পর Missed Call পরীক্ষা
+        if (isCall) {
+            setTimeout(async () => {
+                try {
+                    const callRef = db.ref(`audioCalls/${callId}`);
+                    const callSnapshot = await callRef.get();
+                    const call = callSnapshot.val();
+
+                    if (
+                        !call ||
+                        call.status !== 'calling' ||
+                        call.receiverUid !== receiverUid
+                    ) {
+                        console.log('Call was answered or ended:', callId);
+                        return;
+                    }
+
+                    // একই কলের জন্য একবারই Missed Notification
+                    const missedRef = callRef.child('missedNotificationSent');
+
+                    const transaction = await missedRef.transaction(
+                        current => current === true ? undefined : true
+                    );
+
+                    if (!transaction.committed) {
+                        return;
+                    }
+
+                    const latestTokenSnapshot = await db
+                        .ref(`users/${receiverUid}/fcmToken`)
+                        .get();
+
+                    const latestToken = latestTokenSnapshot.val();
+
+                    if (!latestToken) return;
+
+                    const profileSnapshot = await db
+                        .ref(`users/${decodedToken.uid}/profileImage`)
+                        .get();
+
+                    const profileImage = profileSnapshot.val() || '';
+
+                    await messaging.send({
+                        token: latestToken,
+                        data: {
+                            type: 'missed_audio_call',
+                            callerName: callerName || 'Unknown caller',
+                            callerUid: decodedToken.uid,
+                            callId: callId,
+                            profileImage: profileImage
+                        },
+                        android: {
+                            priority: 'high',
+                            ttl: 60 * 60 * 1000
+                        }
+                    });
+
+                    console.log('Missed call notification sent:', callId);
+
+                } catch (error) {
+                    console.error('Missed call error:', error);
+                }
+            }, 30000);
+        }
 
         res.json({
             success: true,
@@ -133,7 +203,7 @@ app.post('/send-notification', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Notification error:', error.message);
+        console.error('Notification error:', error);
 
         res.status(500).json({
             error: 'Could not send notification'
