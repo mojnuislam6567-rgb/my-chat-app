@@ -1,4 +1,3 @@
-```javascript
 const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
@@ -14,7 +13,6 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-
 // ======================================
 // FIREBASE INITIALIZATION
 // ======================================
@@ -29,7 +27,8 @@ const serviceAccount = require(serviceAccountPath);
 
 const firebaseApp = initializeApp({
     credential: cert(serviceAccount),
-    databaseURL: 'https://my-chat-app-eee62-default-rtdb.asia-southeast1.firebasedatabase.app'
+    databaseURL:
+        'https://my-chat-app-eee62-default-rtdb.asia-southeast1.firebasedatabase.app'
 });
 
 const auth = getAuth(firebaseApp);
@@ -38,6 +37,7 @@ const messaging = getMessaging(firebaseApp);
 
 console.log('Firebase Admin initialized');
 
+const activeCallMonitors = new Map();
 
 // ======================================
 // HOME
@@ -46,7 +46,6 @@ console.log('Firebase Admin initialized');
 app.get('/', (req, res) => {
     res.send('ChatApp Backend is running!');
 });
-
 
 // ======================================
 // SEND MISSED CALL NOTIFICATION
@@ -65,10 +64,10 @@ async function sendMissedCallNotification(
         const call = snapshot.val();
 
         if (!call) {
+            console.log('Call not found:', callId);
             return;
         }
 
-        // Accepted call হলে Missed Call পাঠাবে না
         if (
             call.wasAccepted === true ||
             call.status === 'accepted'
@@ -77,7 +76,6 @@ async function sendMissedCallNotification(
             return;
         }
 
-        // শুধু শেষ হওয়া কলের জন্য
         if (
             call.status !== 'ended' &&
             call.status !== 'cancelled' &&
@@ -86,10 +84,10 @@ async function sendMissedCallNotification(
             return;
         }
 
-        // Duplicate notification আটকানো
+        // Prevent duplicate notification
         const missedRef = callRef.child('missedNotificationSent');
 
-        const transaction = await missedRef.transaction(function(current) {
+        const transaction = await missedRef.transaction((current) => {
             if (current === true) {
                 return;
             }
@@ -98,11 +96,10 @@ async function sendMissedCallNotification(
         });
 
         if (!transaction.committed) {
-            console.log('Missed notification already sent:', callId);
+            console.log('Already sent:', callId);
             return;
         }
 
-        // Receiver-এর FCM token
         const tokenSnapshot = await db
             .ref('users/' + receiverUid + '/fcmToken')
             .get();
@@ -111,33 +108,30 @@ async function sendMissedCallNotification(
 
         if (!fcmToken) {
             console.log('Receiver FCM token not found');
-
             await missedRef.set(false);
             return;
         }
 
-        // Caller-এর profile image
         const profileSnapshot = await db
             .ref('users/' + callerUid + '/profileImage')
             .get();
 
         const profileImage = profileSnapshot.val() || '';
 
-        // Missed Call notification
         await messaging.send({
             token: fcmToken,
 
             data: {
                 type: 'missed_audio_call',
                 callerName: callerName || 'Unknown caller',
-                callerUid: callerUid,
+                callerUid: callerUid || '',
                 callId: callId,
                 profileImage: profileImage
             },
 
             android: {
                 priority: 'high',
-                ttl: 3600000
+                ttl: 60 * 60 * 1000
             }
         });
 
@@ -150,15 +144,15 @@ async function sendMissedCallNotification(
             await callRef
                 .child('missedNotificationSent')
                 .set(false);
+
         } catch (resetError) {
-            console.error('Could not reset notification flag:', resetError);
+            console.error('Could not reset flag:', resetError);
         }
     }
 }
-
-
 // ======================================
 // WATCH CALL STATUS
+// NO 5 MINUTE TIMEOUT
 // ======================================
 
 function watchCallForMissedNotification(
@@ -167,40 +161,44 @@ function watchCallForMissedNotification(
     callerUid,
     callerName
 ) {
+    if (activeCallMonitors.has(callId)) {
+        console.log('Monitor already active:', callId);
+        return;
+    }
+
     const callRef = db.ref('audioCalls/' + callId);
     const statusRef = callRef.child('status');
 
     let acceptedSeen = false;
     let notificationHandled = false;
     let listenerRemoved = false;
-    let timeout = null;
 
     function cleanup() {
-        if (listenerRemoved) {
-            return;
-        }
+        if (listenerRemoved) return;
 
         listenerRemoved = true;
 
         statusRef.off('value', statusListener);
 
-        if (timeout !== null) {
-            clearTimeout(timeout);
-        }
+        activeCallMonitors.delete(callId);
     }
 
     async function statusListener(snapshot) {
+
         const status = snapshot.val();
 
         console.log('Call status:', callId, status);
 
-        // Receiver কল রিসিভ করেছে
+        // Call accepted
         if (status === 'accepted') {
+
             acceptedSeen = true;
 
             try {
                 await callRef.child('wasAccepted').set(true);
+
                 console.log('Call accepted:', callId);
+
             } catch (error) {
                 console.error('Could not save accepted status:', error);
             }
@@ -208,30 +206,37 @@ function watchCallForMissedNotification(
             return;
         }
 
-        // Receiver নিজে Decline করেছে
+        // Rejected call
         if (status === 'rejected') {
+
             console.log('Call rejected:', callId);
+
             cleanup();
+
             return;
         }
 
-        // Caller অথবা অন্য কারণে কল শেষ হয়েছে
+        // Call ended
         if (
             status === 'ended' ||
             status === 'cancelled' ||
             status === 'canceled'
         ) {
-            if (notificationHandled) {
-                return;
-            }
+
+            if (notificationHandled) return;
 
             notificationHandled = true;
 
             cleanup();
 
-            // আগে কল রিসিভ হয়ে থাকলে Missed Call নয়
+            // Answered call should not show missed notification
             if (acceptedSeen) {
-                console.log('Answered call ended. No missed notification:', callId);
+
+                console.log(
+                    'Answered call ended. No missed notification:',
+                    callId
+                );
+
                 return;
             }
 
@@ -244,69 +249,34 @@ function watchCallForMissedNotification(
         }
     }
 
-    // Firebase listener
+    activeCallMonitors.set(callId, true);
+
     statusRef.on(
         'value',
         statusListener,
-        function(error) {
+        (error) => {
+
             console.error('Call status listener error:', error);
+
+            cleanup();
         }
     );
-
-    // ======================================
-    // 5 MINUTE CALL TIMEOUT
-    // ======================================
-
-    timeout = setTimeout(async function() {
-        try {
-            const transaction = await callRef.transaction(function(current) {
-                if (!current) {
-                    return;
-                }
-
-                // কল ইতিমধ্যে শেষ হলে কিছু করবে না
-                if (
-                    current.status !== 'calling' &&
-                    current.status !== 'ringing'
-                ) {
-                    return;
-                }
-
-                // Accepted call শেষ করবে না
-                if (current.wasAccepted === true) {
-                    return;
-                }
-
-                current.status = 'ended';
-                current.endedReason = 'timeout';
-
-                return current;
-            });
-
-            if (transaction.committed) {
-                console.log('Call ended after 5 minutes:', callId);
-            } else {
-                console.log('Call already answered or ended:', callId);
-            }
-
-        } catch (error) {
-            console.error('Call timeout error:', error);
-        }
-
-    }, 5 * 60 * 1000);
 }
-
 
 // ======================================
 // SEND NOTIFICATION API
 // ======================================
 
 app.post('/send-notification', async (req, res) => {
+
     try {
+
         const authorization = req.headers.authorization || '';
 
         if (!authorization.startsWith('Bearer ')) {
+
             return res.status(401).json({
+                success: false,
                 error: 'Authentication required'
             });
         }
@@ -322,10 +292,12 @@ app.post('/send-notification', async (req, res) => {
             callId,
             senderName,
             message
-        } = req.body;
+        } = req.body || {};
 
         if (!receiverUid || !type) {
+
             return res.status(400).json({
+                success: false,
                 error: 'receiverUid and type are required'
             });
         }
@@ -334,13 +306,17 @@ app.post('/send-notification', async (req, res) => {
             type !== 'incoming_audio_call' &&
             type !== 'new_message'
         ) {
+
             return res.status(400).json({
+                success: false,
                 error: 'Invalid notification type'
             });
         }
 
         if (decodedToken.uid === receiverUid) {
+
             return res.status(400).json({
+                success: false,
                 error: 'Cannot notify yourself'
             });
         }
@@ -352,7 +328,9 @@ app.post('/send-notification', async (req, res) => {
         const fcmToken = tokenSnapshot.val();
 
         if (!fcmToken) {
+
             return res.status(404).json({
+                success: false,
                 error: 'Receiver FCM token not found'
             });
         }
@@ -360,28 +338,32 @@ app.post('/send-notification', async (req, res) => {
         const isCall = type === 'incoming_audio_call';
 
         if (isCall && !callId) {
+
             return res.status(400).json({
+                success: false,
                 error: 'callId is required'
             });
         }
 
-        // ======================================
-        // VERIFY CALL
-        // ======================================
+        let call = null;
 
+        // Verify call
         if (isCall) {
+
             const callSnapshot = await db
                 .ref('audioCalls/' + callId)
                 .get();
 
-            const call = callSnapshot.val();
+            call = callSnapshot.val();
 
             if (
                 !call ||
                 call.callerUid !== decodedToken.uid ||
                 call.receiverUid !== receiverUid
             ) {
+
                 return res.status(403).json({
+                    success: false,
                     error: 'Invalid call'
                 });
             }
@@ -390,17 +372,19 @@ app.post('/send-notification', async (req, res) => {
                 call.status !== 'calling' &&
                 call.status !== 'ringing'
             ) {
+
                 return res.status(400).json({
+                    success: false,
                     error: 'Call is not ringing'
                 });
             }
         }
-
-        // ======================================
+               // ======================================
         // SEND FCM NOTIFICATION
         // ======================================
 
         const result = await messaging.send({
+
             token: fcmToken,
 
             data: {
@@ -413,9 +397,54 @@ app.post('/send-notification', async (req, res) => {
             },
 
             android: {
-                priority: 'high'
+                priority: 'high',
+                ttl: 60 * 60 * 1000
             }
         });
 
-        // ======================================
-        // START CALL MONITOR
+        // Start call monitor
+        // No 5 minute timeout
+
+        if (isCall) {
+
+            watchCallForMissedNotification(
+                callId,
+                receiverUid,
+                decodedToken.uid,
+                callerName || 'Unknown caller'
+            );
+        }
+
+        return res.status(200).json({
+
+            success: true,
+
+            message: 'Notification sent successfully',
+
+            messageId: result
+        });
+
+    } catch (error) {
+
+        console.error('Send notification error:', error);
+
+        return res.status(500).json({
+
+            success: false,
+
+            error: 'Failed to send notification'
+        });
+    }
+});
+
+// ======================================
+// START SERVER
+// ======================================
+
+app.listen(PORT, () => {
+
+    console.log(
+        'ChatApp Backend listening on port ' + PORT
+    );
+
+}); 
